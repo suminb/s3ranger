@@ -29,8 +29,7 @@ func DefaultConfig() S3Config {
 }
 
 func ExpandPath(path string) string {
-	// Strip shell-style backslash escapes (e.g. "\ " → " ")
-	path = strings.ReplaceAll(path, "\\ ", " ")
+	path = stripBackslashEscapes(path)
 
 	if strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
@@ -40,6 +39,25 @@ func ExpandPath(path string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
+}
+
+// stripBackslashEscapes removes shell-style backslash escaping.
+// E.g. "file\ name" → "file name", "path\\" → "path\".
+func stripBackslashEscapes(s string) string {
+	if !strings.ContainsRune(s, '\\') {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+			b.WriteByte(s[i])
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
 }
 
 func LoadConfig(path string) (S3Config, error) {
