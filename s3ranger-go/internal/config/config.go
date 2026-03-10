@@ -29,6 +29,9 @@ func DefaultConfig() S3Config {
 }
 
 func ExpandPath(path string) string {
+	// Strip shell-style backslash escapes (e.g. "\ " → " ")
+	path = strings.ReplaceAll(path, "\\ ", " ")
+
 	if strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
