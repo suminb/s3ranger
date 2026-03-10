@@ -5,22 +5,26 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/s3ranger/s3ranger-go/internal/config"
 	s3gw "github.com/s3ranger/s3ranger-go/internal/s3"
 	"github.com/s3ranger/s3ranger-go/internal/tui/theme"
+	"github.com/s3ranger/s3ranger-go/internal/util"
 )
 
 type MultiDownloadDoneMsg struct {
 	Succeeded int
 	Failed    int
 }
+
+type multiDownloadTickMsg struct{}
 
 type MultiDownloadItem struct {
 	Key      string
@@ -29,20 +33,33 @@ type MultiDownloadItem struct {
 	SizeStr  string
 }
 
-type MultiDownloadModel struct {
-	Theme       *theme.Theme
-	Gateway     *s3gw.Gateway
-	Bucket      string
-	Items       []MultiDownloadItem
-	Width       int
-	Height      int
+// multiDownloadState holds shared state between the download goroutine and the UI.
+type multiDownloadState struct {
+	mu          sync.Mutex
+	currentFile int
+	totalFiles  int
+	currentName string
+	progress    *s3gw.DownloadProgress
+}
 
-	destInput  textinput.Model
-	spinner    spinner.Model
-	inProgress bool
-	done       bool
-	succeeded  int
-	failed     int
+type MultiDownloadModel struct {
+	Theme   *theme.Theme
+	Gateway *s3gw.Gateway
+	Bucket  string
+	Items   []MultiDownloadItem
+	Width   int
+	Height  int
+
+	destInput   textinput.Model
+	progressBar progress.Model
+	inProgress  bool
+	done        bool
+	succeeded   int
+	failed      int
+
+	cancelCtx context.Context
+	cancelFn  context.CancelFunc
+	state     *multiDownloadState
 }
 
 func NewMultiDownload(t *theme.Theme, gw *s3gw.Gateway, bucket string, items []MultiDownloadItem, downloadDir string) MultiDownloadModel {
@@ -52,33 +69,32 @@ func NewMultiDownload(t *theme.Theme, gw *s3gw.Gateway, bucket string, items []M
 	ti.CharLimit = 512
 	ti.SetValue(downloadDir)
 
-	s := spinner.New()
-	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(t.Primary)
+	bar := progress.New(
+		progress.WithSolidFill(string(t.Primary)),
+		progress.WithoutPercentage(),
+	)
 
 	return MultiDownloadModel{
-		Theme:     t,
-		Gateway:   gw,
-		Bucket:    bucket,
-		Items:     items,
-		destInput: ti,
-		spinner:   s,
+		Theme:       t,
+		Gateway:     gw,
+		Bucket:      bucket,
+		Items:       items,
+		destInput:   ti,
+		progressBar: bar,
 	}
 }
 
 func (m MultiDownloadModel) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, m.spinner.Tick)
+	return textinput.Blink
 }
 
 func (m MultiDownloadModel) Update(msg tea.Msg) (MultiDownloadModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
-
 	case tea.KeyMsg:
 		if m.inProgress {
+			if key.Matches(msg, key.NewBinding(key.WithKeys("esc"))) {
+				m.cancelFn()
+			}
 			return m, nil
 		}
 		switch {
@@ -87,14 +103,25 @@ func (m MultiDownloadModel) Update(msg tea.Msg) (MultiDownloadModel, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("enter", "ctrl+enter"))):
 			m.inProgress = true
-			return m, m.executeDownload()
+			m.state = &multiDownloadState{
+				progress: &s3gw.DownloadProgress{},
+			}
+			m.cancelCtx, m.cancelFn = context.WithCancel(context.Background())
+			return m, tea.Batch(m.executeDownload(), m.tickCmd())
 		default:
 			var cmd tea.Cmd
 			m.destInput, cmd = m.destInput.Update(msg)
 			return m, cmd
 		}
 
+	case multiDownloadTickMsg:
+		if !m.inProgress {
+			return m, nil
+		}
+		return m, m.tickCmd()
+
 	case MultiDownloadDoneMsg:
+		m.inProgress = false
 		m.done = true
 		m.succeeded = msg.Succeeded
 		m.failed = msg.Failed
@@ -104,15 +131,22 @@ func (m MultiDownloadModel) Update(msg tea.Msg) (MultiDownloadModel, tea.Cmd) {
 	return m, nil
 }
 
+func (m MultiDownloadModel) tickCmd() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+		return multiDownloadTickMsg{}
+	})
+}
+
 func (m MultiDownloadModel) executeDownload() tea.Cmd {
 	gw := m.Gateway
 	bucket := m.Bucket
 	items := make([]MultiDownloadItem, len(m.Items))
 	copy(items, m.Items)
 	dest := config.ExpandPath(m.destInput.Value())
+	ctx := m.cancelCtx
+	state := m.state
 
 	return func() tea.Msg {
-		ctx := context.Background()
 		succeeded := 0
 		failed := 0
 
@@ -120,15 +154,33 @@ func (m MultiDownloadModel) executeDownload() tea.Cmd {
 			return MultiDownloadDoneMsg{Failed: len(items)}
 		}
 
-		for _, item := range items {
+		for i, item := range items {
+			fileProgress := &s3gw.DownloadProgress{}
+			state.mu.Lock()
+			state.currentFile = i + 1
+			state.totalFiles = len(items)
+			state.currentName = item.Name
+			state.progress = fileProgress
+			state.mu.Unlock()
+
 			var err error
 			if item.IsFolder {
-				err = gw.DownloadDirectory(ctx, bucket, item.Key, dest)
+				err = gw.DownloadDirectoryWithProgress(ctx, bucket, item.Key, dest,
+					func(fileIdx, totalFiles int, currentFile string, progress *s3gw.DownloadProgress) {
+						state.mu.Lock()
+						state.currentName = currentFile
+						state.progress = progress
+						state.mu.Unlock()
+					})
 			} else {
-				err = gw.DownloadFile(ctx, bucket, item.Key, dest)
+				err = gw.DownloadFileWithProgress(ctx, bucket, item.Key, dest, fileProgress)
 			}
 			if err != nil {
 				failed++
+				if ctx.Err() != nil {
+					failed += len(items) - i - 1
+					break
+				}
 			} else {
 				succeeded++
 			}
@@ -149,31 +201,75 @@ func (m MultiDownloadModel) View() string {
 	title := m.Theme.ModalTitle.Render("Download Multiple Files")
 	countLine := fmt.Sprintf("%d items selected", len(m.Items))
 
-	var itemLines []string
-	maxShow := min(10, len(m.Items))
-	for i := 0; i < maxShow; i++ {
-		item := m.Items[i]
-		icon := "📄"
-		if item.IsFolder {
-			icon = "📁"
-		}
-		line := fmt.Sprintf("  %s %s", icon, item.Name)
-		if item.SizeStr != "" {
-			line += fmt.Sprintf(" (%s)", item.SizeStr)
-		}
-		itemLines = append(itemLines, line)
+	modalWidth := min(65, m.Width-4)
+	barWidth := modalWidth - 6
+	if barWidth < 20 {
+		barWidth = 20
 	}
-	if len(m.Items) > maxShow {
-		itemLines = append(itemLines, fmt.Sprintf("  ... and %d more", len(m.Items)-maxShow))
-	}
-
-	itemList := strings.Join(itemLines, "\n")
-	destLine := "Destination: " + m.destInput.View()
+	m.progressBar.Width = barWidth
 
 	var content string
-	if m.inProgress {
-		content = fmt.Sprintf("%s\n\n%s\n\n%s Downloading...", title, countLine, m.spinner.View())
+	if m.inProgress && m.state != nil {
+		m.state.mu.Lock()
+		currentFile := m.state.currentFile
+		totalFiles := m.state.totalFiles
+		currentName := m.state.currentName
+		prog := m.state.progress
+		m.state.mu.Unlock()
+
+		headerLine := fmt.Sprintf("Downloading %d/%d: %s", currentFile, totalFiles, currentName)
+
+		var bar, statsLine string
+		if prog != nil {
+			pct := prog.Percent()
+			downloaded := prog.BytesDownloaded.Load()
+			total := prog.TotalBytes
+
+			bar = m.progressBar.ViewAs(pct)
+
+			if total > 0 {
+				statsLine = fmt.Sprintf("%s / %s  •  %s  •  %s remaining",
+					util.FormatFileSize(downloaded),
+					util.FormatFileSize(total),
+					prog.Bandwidth(),
+					prog.ETA(),
+				)
+			} else {
+				statsLine = fmt.Sprintf("%s  •  %s",
+					util.FormatFileSize(downloaded),
+					prog.Bandwidth(),
+				)
+			}
+		}
+
+		content = fmt.Sprintf("%s\n\n%s\n\n%s\n%s\n\n%s",
+			title, headerLine,
+			bar,
+			m.Theme.DimText.Render(statsLine),
+			m.Theme.DimText.Render("[esc] cancel"),
+		)
 	} else {
+		var itemLines []string
+		maxShow := min(10, len(m.Items))
+		for i := 0; i < maxShow; i++ {
+			item := m.Items[i]
+			icon := "📄"
+			if item.IsFolder {
+				icon = "📁"
+			}
+			line := fmt.Sprintf("  %s %s", icon, item.Name)
+			if item.SizeStr != "" {
+				line += fmt.Sprintf(" (%s)", item.SizeStr)
+			}
+			itemLines = append(itemLines, line)
+		}
+		if len(m.Items) > maxShow {
+			itemLines = append(itemLines, fmt.Sprintf("  ... and %d more", len(m.Items)-maxShow))
+		}
+
+		itemList := strings.Join(itemLines, "\n")
+		destLine := "Destination: " + m.destInput.View()
+
 		content = fmt.Sprintf("%s\n\n%s\n\n%s\n\n%s\n\n%s  %s",
 			title, countLine, itemList, destLine,
 			m.Theme.DimText.Render("[esc] cancel"),
@@ -182,6 +278,6 @@ func (m MultiDownloadModel) View() string {
 	}
 
 	return m.Theme.ModalBox.
-		Width(min(65, m.Width-4)).
+		Width(modalWidth).
 		Render(content)
 }

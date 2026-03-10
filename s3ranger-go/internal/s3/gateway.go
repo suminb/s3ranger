@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -13,6 +14,84 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
+
+// DownloadProgress tracks byte-level progress for a download operation.
+type DownloadProgress struct {
+	BytesDownloaded atomic.Int64
+	TotalBytes      int64
+	StartedAt       time.Time
+}
+
+// Percent returns the download completion percentage (0.0 to 1.0).
+func (p *DownloadProgress) Percent() float64 {
+	if p.TotalBytes <= 0 {
+		return 0
+	}
+	return float64(p.BytesDownloaded.Load()) / float64(p.TotalBytes)
+}
+
+// Bandwidth returns a human-readable bandwidth string (e.g. "2.3 MB/s").
+func (p *DownloadProgress) Bandwidth() string {
+	elapsed := time.Since(p.StartedAt).Seconds()
+	if elapsed < 0.1 {
+		return "-- B/s"
+	}
+	bps := float64(p.BytesDownloaded.Load()) / elapsed
+	return formatRate(bps)
+}
+
+// ETA returns an estimated time remaining string (e.g. "~12s").
+func (p *DownloadProgress) ETA() string {
+	elapsed := time.Since(p.StartedAt).Seconds()
+	if elapsed < 0.1 || p.TotalBytes <= 0 {
+		return "~..."
+	}
+	downloaded := p.BytesDownloaded.Load()
+	if downloaded <= 0 {
+		return "~..."
+	}
+	bps := float64(downloaded) / elapsed
+	remaining := float64(p.TotalBytes-downloaded) / bps
+	if remaining < 1 {
+		return "~0s"
+	}
+	if remaining < 60 {
+		return fmt.Sprintf("~%ds", int(remaining))
+	}
+	return fmt.Sprintf("~%dm%ds", int(remaining)/60, int(remaining)%60)
+}
+
+func formatRate(bps float64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+	)
+	switch {
+	case bps < KB:
+		return fmt.Sprintf("%.0f B/s", bps)
+	case bps < MB:
+		return fmt.Sprintf("%.1f KB/s", bps/float64(KB))
+	case bps < GB:
+		return fmt.Sprintf("%.1f MB/s", bps/float64(MB))
+	default:
+		return fmt.Sprintf("%.1f GB/s", bps/float64(GB))
+	}
+}
+
+// progressWriterAt wraps an io.WriterAt and atomically tracks bytes written.
+type progressWriterAt struct {
+	writer   *os.File
+	progress *DownloadProgress
+}
+
+func (pw *progressWriterAt) WriteAt(p []byte, off int64) (int, error) {
+	n, err := pw.writer.WriteAt(p, off)
+	if n > 0 {
+		pw.progress.BytesDownloaded.Add(int64(n))
+	}
+	return n, err
+}
 
 type Gateway struct {
 	client     *s3.Client
@@ -263,6 +342,87 @@ func (g *Gateway) DownloadDirectory(ctx context.Context, bucket, prefix, localDi
 		}
 
 		if err := g.DownloadFile(ctx, bucket, obj.Key, localPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DownloadFileWithProgress downloads a file with byte-level progress tracking.
+// The passed context can be cancelled to abort the download.
+func (g *Gateway) DownloadFileWithProgress(ctx context.Context, bucket, key, localPath string, progress *DownloadProgress) error {
+	// If localPath is a directory, append the filename
+	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
+		localPath = filepath.Join(localPath, filepath.Base(key))
+	} else if strings.HasSuffix(localPath, string(os.PathSeparator)) || strings.HasSuffix(localPath, "/") {
+		if err := os.MkdirAll(localPath, 0755); err != nil {
+			return fmt.Errorf("creating directory: %w", err)
+		}
+		localPath = filepath.Join(localPath, filepath.Base(key))
+	}
+
+	dir := filepath.Dir(localPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating directory: %w", err)
+	}
+
+	// HeadObject to get content length
+	head, err := g.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err == nil && head.ContentLength != nil {
+		progress.TotalBytes = *head.ContentLength
+	}
+
+	progress.StartedAt = time.Now()
+
+	f, err := os.Create(localPath)
+	if err != nil {
+		return fmt.Errorf("creating file: %w", err)
+	}
+	defer f.Close()
+
+	pw := &progressWriterAt{writer: f, progress: progress}
+
+	_, err = g.downloader.Download(ctx, pw, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		f.Close()
+		os.Remove(localPath)
+		return fmt.Errorf("downloading file: %w", err)
+	}
+	return nil
+}
+
+// DownloadDirectoryWithProgress downloads a directory with per-file progress tracking.
+// progressFn is called before each file starts downloading.
+func (g *Gateway) DownloadDirectoryWithProgress(ctx context.Context, bucket, prefix, localDir string, progressFn func(fileIdx, totalFiles int, currentFile string, progress *DownloadProgress)) error {
+	objects, err := g.ListAllObjectsForPrefix(ctx, bucket, prefix)
+	if err != nil {
+		return err
+	}
+
+	for i, obj := range objects {
+		relPath := strings.TrimPrefix(obj.Key, prefix)
+		if relPath == "" {
+			continue
+		}
+		localPath := filepath.Join(localDir, filepath.FromSlash(relPath))
+
+		dir := filepath.Dir(localPath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("creating directory: %w", err)
+		}
+
+		progress := &DownloadProgress{}
+		if progressFn != nil {
+			progressFn(i, len(objects), relPath, progress)
+		}
+
+		if err := g.DownloadFileWithProgress(ctx, bucket, obj.Key, localPath, progress); err != nil {
 			return err
 		}
 	}
