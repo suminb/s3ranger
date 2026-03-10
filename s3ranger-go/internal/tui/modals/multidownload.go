@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -57,9 +58,18 @@ type MultiDownloadModel struct {
 	succeeded   int
 	failed      int
 
+	resolvedDest     string
+	conflicts        []conflictInfo
+	confirmOverwrite bool
+
 	cancelCtx context.Context
 	cancelFn  context.CancelFunc
 	state     *multiDownloadState
+}
+
+type conflictInfo struct {
+	name string
+	size int64
 }
 
 func NewMultiDownload(t *theme.Theme, gw *s3gw.Gateway, bucket string, items []MultiDownloadItem, downloadDir string) MultiDownloadModel {
@@ -97,11 +107,49 @@ func (m MultiDownloadModel) Update(msg tea.Msg) (MultiDownloadModel, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.confirmOverwrite {
+			switch {
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+				m.confirmOverwrite = false
+				m.conflicts = nil
+				m.resolvedDest = ""
+				return m, nil
+			case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+				m.confirmOverwrite = false
+				m.inProgress = true
+				m.state = &multiDownloadState{
+					progress: &s3gw.DownloadProgress{},
+				}
+				m.cancelCtx, m.cancelFn = context.WithCancel(context.Background())
+				return m, tea.Batch(m.executeDownload(), m.tickCmd())
+			}
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 			m.done = true
 			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("enter", "ctrl+enter"))):
+			dest := config.ExpandPath(m.destInput.Value())
+			m.resolvedDest = dest
+			var conflicts []conflictInfo
+			for _, item := range m.Items {
+				if item.IsFolder {
+					continue
+				}
+				localPath := filepath.Join(dest, filepath.Base(item.Key))
+				if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
+					conflicts = append(conflicts, conflictInfo{
+						name: filepath.Base(item.Key),
+						size: info.Size(),
+					})
+				}
+			}
+			if len(conflicts) > 0 {
+				m.conflicts = conflicts
+				m.confirmOverwrite = true
+				return m, nil
+			}
 			m.inProgress = true
 			m.state = &multiDownloadState{
 				progress: &s3gw.DownloadProgress{},
@@ -247,6 +295,29 @@ func (m MultiDownloadModel) View() string {
 			bar,
 			m.Theme.DimText.Render(statsLine),
 			m.Theme.DimText.Render("[esc] cancel"),
+		)
+	} else if m.confirmOverwrite {
+		warningLine := m.Theme.WarningText.Render(
+			fmt.Sprintf("⚠ %d files already exist and will be overwritten:", len(m.conflicts)))
+
+		var conflictLines []string
+		maxShow := min(10, len(m.conflicts))
+		for i := 0; i < maxShow; i++ {
+			c := m.conflicts[i]
+			conflictLines = append(conflictLines,
+				fmt.Sprintf("  %s (%s)", c.name, util.FormatFileSize(c.size)))
+		}
+		if len(m.conflicts) > maxShow {
+			conflictLines = append(conflictLines,
+				fmt.Sprintf("  ... and %d more", len(m.conflicts)-maxShow))
+		}
+
+		conflictList := strings.Join(conflictLines, "\n")
+		content = fmt.Sprintf("%s\n\n%s\n%s\n\n%s  %s",
+			title,
+			warningLine, conflictList,
+			m.Theme.DimText.Render("[esc] back"),
+			m.Theme.DimText.Render("[enter] overwrite all"),
 		)
 	} else {
 		var itemLines []string

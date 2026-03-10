@@ -3,6 +3,9 @@ package modals
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -35,6 +38,10 @@ type DownloadModel struct {
 	progressBar progress.Model
 	inProgress  bool
 	done        bool
+
+	resolvedPath     string
+	confirmOverwrite bool
+	existingSize     int64
 
 	cancelCtx context.Context
 	cancelFn  context.CancelFunc
@@ -77,11 +84,33 @@ func (m DownloadModel) Update(msg tea.Msg) (DownloadModel, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.confirmOverwrite {
+			switch {
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+				m.confirmOverwrite = false
+				m.resolvedPath = ""
+				return m, nil
+			case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+				m.confirmOverwrite = false
+				m.inProgress = true
+				m.progress = &s3gw.DownloadProgress{}
+				m.cancelCtx, m.cancelFn = context.WithCancel(context.Background())
+				return m, tea.Batch(m.executeDownloadPath(m.resolvedPath), m.tickCmd())
+			}
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 			m.done = true
 			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("enter", "ctrl+enter"))):
+			resolved := resolveDownloadPath(m.destInput.Value(), m.Key)
+			if info, err := os.Stat(resolved); err == nil && !info.IsDir() {
+				m.resolvedPath = resolved
+				m.existingSize = info.Size()
+				m.confirmOverwrite = true
+				return m, nil
+			}
 			m.inProgress = true
 			m.progress = &s3gw.DownloadProgress{}
 			m.cancelCtx, m.cancelFn = context.WithCancel(context.Background())
@@ -113,12 +142,42 @@ func (m DownloadModel) tickCmd() tea.Cmd {
 	})
 }
 
+func resolveDownloadPath(dest, key string) string {
+	dest = config.ExpandPath(dest)
+	if info, err := os.Stat(dest); err == nil && info.IsDir() {
+		return filepath.Join(dest, filepath.Base(key))
+	}
+	if strings.HasSuffix(dest, "/") || strings.HasSuffix(dest, string(os.PathSeparator)) {
+		return filepath.Join(dest, filepath.Base(key))
+	}
+	return dest
+}
+
 func (m DownloadModel) executeDownload() tea.Cmd {
 	gw := m.Gateway
 	bucket := m.Bucket
 	objKey := m.Key
 	isFolder := m.IsFolder
 	dest := config.ExpandPath(m.destInput.Value())
+	ctx := m.cancelCtx
+	prog := m.progress
+
+	return func() tea.Msg {
+		var err error
+		if isFolder {
+			err = gw.DownloadDirectoryWithProgress(ctx, bucket, objKey, dest, nil)
+		} else {
+			err = gw.DownloadFileWithProgress(ctx, bucket, objKey, dest, prog)
+		}
+		return DownloadResultMsg{Err: err}
+	}
+}
+
+func (m DownloadModel) executeDownloadPath(dest string) tea.Cmd {
+	gw := m.Gateway
+	bucket := m.Bucket
+	objKey := m.Key
+	isFolder := m.IsFolder
 	ctx := m.cancelCtx
 	prog := m.progress
 
@@ -178,6 +237,16 @@ func (m DownloadModel) View() string {
 			bar,
 			m.Theme.DimText.Render(statsLine),
 			m.Theme.DimText.Render("[esc] cancel"),
+		)
+	} else if m.confirmOverwrite {
+		warningLine := m.Theme.WarningText.Render("⚠ File already exists:")
+		fileLine := fmt.Sprintf("  %s (%s)", m.resolvedPath, util.FormatFileSize(m.existingSize))
+
+		content = fmt.Sprintf("%s\n\n%s\n\n%s\n%s\n\n%s  %s",
+			title, sourceLine,
+			warningLine, fileLine,
+			m.Theme.DimText.Render("[esc] back"),
+			m.Theme.DimText.Render("[enter] overwrite"),
 		)
 	} else {
 		destLine := "Destination: " + m.destInput.View()
