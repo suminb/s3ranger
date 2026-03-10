@@ -111,7 +111,7 @@ func (m MoveCopyModel) Update(msg tea.Msg) (MoveCopyModel, tea.Cmd) {
 			}
 			return m, nil
 
-		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+enter"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+enter", "ctrl+y"))):
 			if m.objectList.BucketName != "" {
 				if err := m.validateDestination(); err == nil {
 					m.inProgress = true
@@ -132,7 +132,7 @@ func (m MoveCopyModel) Update(msg tea.Msg) (MoveCopyModel, tea.Cmd) {
 					return m, cmd
 				}
 			} else {
-				item := m.objectList.CursorItem()
+				item := m.objectList.CursorItemRaw()
 				if item != nil && item.IsParent {
 					var cmd tea.Cmd
 					m.objectList, cmd = m.objectList.NavigateUp()
@@ -280,7 +280,7 @@ func (m MoveCopyModel) View() string {
 
 	footer := fmt.Sprintf("%s  %s  %s",
 		m.Theme.FooterKey.Render("tab")+" "+m.Theme.FooterDesc.Render("switch panel"),
-		m.Theme.FooterKey.Render("ctrl+enter")+" "+m.Theme.FooterDesc.Render("confirm"),
+		m.Theme.FooterKey.Render("ctrl+y")+" "+m.Theme.FooterDesc.Render("confirm"),
 		m.Theme.FooterKey.Render("esc")+" "+m.Theme.FooterDesc.Render("cancel"),
 	)
 	if destInfo != "" {

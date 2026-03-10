@@ -166,12 +166,23 @@ func (m ObjectListModel) SelectedItems() []ObjectItem {
 	return selected
 }
 
+// CursorItem returns the item under the cursor, excluding parent entries.
+// Use CursorItemRaw to include parent entries.
 func (m ObjectListModel) CursorItem() *ObjectItem {
 	if m.cursor >= 0 && m.cursor < len(m.items) {
 		item := m.items[m.cursor]
 		if !item.IsParent {
 			return &item
 		}
+	}
+	return nil
+}
+
+// CursorItemRaw returns the item under the cursor, including parent entries.
+func (m ObjectListModel) CursorItemRaw() *ObjectItem {
+	if m.cursor >= 0 && m.cursor < len(m.items) {
+		item := m.items[m.cursor]
+		return &item
 	}
 	return nil
 }

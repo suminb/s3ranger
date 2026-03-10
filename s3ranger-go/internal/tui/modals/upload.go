@@ -76,7 +76,7 @@ func (m UploadModel) Update(msg tea.Msg) (UploadModel, tea.Cmd) {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 			m.done = true
 			return m, nil
-		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+enter"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("enter", "ctrl+enter"))):
 			if m.validate() {
 				m.inProgress = true
 				return m, m.executeUpload()
@@ -166,7 +166,7 @@ func (m UploadModel) View() string {
 		}
 		content += fmt.Sprintf("\n\n%s  %s",
 			m.Theme.DimText.Render("[esc] cancel"),
-			m.Theme.DimText.Render("[ctrl+enter] confirm"),
+			m.Theme.DimText.Render("[enter] confirm"),
 		)
 	}
 

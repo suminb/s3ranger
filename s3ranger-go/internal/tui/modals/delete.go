@@ -66,7 +66,7 @@ func (m DeleteModel) Update(msg tea.Msg) (DeleteModel, tea.Cmd) {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 			m.done = true
 			return m, nil
-		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+enter"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("enter", "ctrl+enter"))):
 			m.inProgress = true
 			return m, m.executeDelete()
 		}
@@ -120,7 +120,7 @@ func (m DeleteModel) View() string {
 		content = fmt.Sprintf("%s\n\n%s\n\n%s\n\n%s  %s",
 			title, pathLine, warning,
 			m.Theme.DimText.Render("[esc] cancel"),
-			m.Theme.DimText.Render("[ctrl+enter] confirm"),
+			m.Theme.DimText.Render("[enter] confirm"),
 		)
 	}
 

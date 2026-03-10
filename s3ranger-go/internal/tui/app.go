@@ -210,7 +210,7 @@ func (m Model) updateObjectPanel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case key.Matches(msg, Keys.Enter):
-		item := m.objectList.CursorItem()
+		item := m.objectList.CursorItemRaw()
 		if item != nil {
 			if item.IsParent {
 				var cmd tea.Cmd
