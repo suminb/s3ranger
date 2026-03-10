@@ -74,7 +74,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		if config.IsValidTheme(flagTheme) {
 			cfg.Theme = flagTheme
 		} else {
-			fmt.Fprintf(os.Stderr, "Warning: invalid theme '%s', using '%s'\n", flagTheme, cfg.Theme)
+			return fmt.Errorf("invalid theme '%s'. Valid themes: %v", flagTheme, config.ValidThemes)
 		}
 	}
 
@@ -91,11 +91,6 @@ func runRoot(cmd *cobra.Command, args []string) error {
 
 	downloadDir, downloadWarning := config.ResolveDownloadDirectory(flagDownloadDir, cfg.DownloadDirectory)
 
-	profileForCreds := flagProfileName
-	if profileForCreds == "" {
-		profileForCreds = cfg.ProfileName
-	}
-
 	creds, err := credentials.Resolve(credentials.ResolveInput{
 		CLIAccessKeyID:     flagAccessKeyID,
 		CLISecretAccessKey: flagSecretAccessKey,
@@ -107,19 +102,29 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolving credentials: %w", err)
 	}
 
+	if err := creds.Validate(); err != nil {
+		return err
+	}
+
+	// Resolve endpoint URL: CLI flag > ~/.aws/config for profile
+	endpointURL := flagEndpointURL
+	if endpointURL == "" {
+		endpointURL = credentials.LookupEndpointURL(credentials.ProfileDisplayName(creds))
+	}
+
 	ctx := context.Background()
-	awsCfg, err := credentials.BuildAWSConfig(ctx, creds, flagRegionName, flagEndpointURL)
+	awsCfg, err := credentials.BuildAWSConfig(ctx, creds, flagRegionName, endpointURL)
 	if err != nil {
 		return fmt.Errorf("building AWS config: %w", err)
 	}
 
-	gw := s3gw.NewGateway(awsCfg, flagEndpointURL)
+	gw := s3gw.NewGateway(awsCfg, endpointURL)
 
 	appModel := tui.New(tui.AppConfig{
 		Gateway:           gw,
 		Theme:             cfg.Theme,
 		ProfileDisplay:    credentials.ProfileDisplayName(creds),
-		EndpointURL:       flagEndpointURL,
+		EndpointURL:       endpointURL,
 		EnablePagination:  config.PaginationEnabled(cfg),
 		DownloadDirectory: downloadDir,
 		DownloadWarning:   downloadWarning,
