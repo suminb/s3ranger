@@ -14,7 +14,7 @@ import (
 	"github.com/s3ranger/s3ranger-go/internal/tui"
 )
 
-const Version = "2.0.0"
+const Version = "1.3.0"
 
 var (
 	flagEndpointURL      string
