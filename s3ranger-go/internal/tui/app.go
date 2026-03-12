@@ -458,8 +458,8 @@ func (m Model) updateModal(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.sortModel.IsDone() {
 			m.modal = noModal
 			m.footer.InModal = false
-			if sortMsg, ok := msg.(modals.SortSelectedMsg); ok {
-				m.objectList.SetSort(sortMsg.Column)
+			if col := m.sortModel.SelectedColumn(); col >= 0 {
+				m.objectList.SetSort(col)
 			}
 		}
 		return m, cmd

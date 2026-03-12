@@ -14,14 +14,15 @@ type SortSelectedMsg struct {
 }
 
 type SortModel struct {
-	Theme  *theme.Theme
-	Width  int
-	Height int
-	done   bool
+	Theme    *theme.Theme
+	Width    int
+	Height   int
+	done     bool
+	selected int // -1 = no selection, 0-3 = column
 }
 
 func NewSort(t *theme.Theme) SortModel {
-	return SortModel{Theme: t}
+	return SortModel{Theme: t, selected: -1}
 }
 
 func (m SortModel) Init() tea.Cmd {
@@ -37,16 +38,20 @@ func (m SortModel) Update(msg tea.Msg) (SortModel, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("1"))):
 			m.done = true
-			return m, func() tea.Msg { return SortSelectedMsg{Column: 0} }
+			m.selected = 0
+			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("2"))):
 			m.done = true
-			return m, func() tea.Msg { return SortSelectedMsg{Column: 1} }
+			m.selected = 1
+			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("3"))):
 			m.done = true
-			return m, func() tea.Msg { return SortSelectedMsg{Column: 2} }
+			m.selected = 2
+			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("4"))):
 			m.done = true
-			return m, func() tea.Msg { return SortSelectedMsg{Column: 3} }
+			m.selected = 3
+			return m, nil
 		}
 	}
 	return m, nil
@@ -54,6 +59,10 @@ func (m SortModel) Update(msg tea.Msg) (SortModel, tea.Cmd) {
 
 func (m SortModel) IsDone() bool {
 	return m.done
+}
+
+func (m SortModel) SelectedColumn() int {
+	return m.selected
 }
 
 func (m SortModel) View() string {

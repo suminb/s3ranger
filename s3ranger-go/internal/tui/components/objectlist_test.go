@@ -240,6 +240,43 @@ func TestSetSort_ChangeColumn(t *testing.T) {
 	if m.sortAscending {
 		t.Error("New column should start descending")
 	}
+
+	// Verify items are actually reordered by size descending
+	fileNames := itemNames(m.items)[3:] // skip parent + 2 folders
+	expectedFiles := []string{"app.go", "readme.md", "Makefile"} // 4096, 1024, 512
+	for i, want := range expectedFiles {
+		if fileNames[i] != want {
+			t.Errorf("SetSort size desc: position %d: got %q, want %q (all: %v)", i, fileNames[i], want, fileNames)
+		}
+	}
+}
+
+func TestSetSort_SizeFromNameSorted(t *testing.T) {
+	// Simulate: items loaded and sorted by name, then user sorts by size
+	m := &ObjectListModel{
+		items:         makeTestItems(),
+		sortColumn:    0,
+		sortAscending: true,
+	}
+	m.sortItems() // sort by name first
+
+	// Verify name order: Makefile, app.go, readme.md
+	filesBefore := itemNames(m.items)[3:]
+	if filesBefore[0] != "app.go" {
+		t.Errorf("Expected name sort: got %v", filesBefore)
+	}
+
+	// Now sort by size
+	m.SetSort(3)
+
+	// Should be size descending: app.go(4096), readme.md(1024), Makefile(512)
+	filesAfter := itemNames(m.items)[3:]
+	expected := []string{"app.go", "readme.md", "Makefile"}
+	for i, want := range expected {
+		if filesAfter[i] != want {
+			t.Errorf("Size desc position %d: got %q, want %q (all: %v)", i, filesAfter[i], want, filesAfter)
+		}
+	}
 }
 
 func TestSelectedItems(t *testing.T) {

@@ -241,12 +241,8 @@ func (m ObjectListModel) Update(msg tea.Msg) (ObjectListModel, tea.Cmd) {
 		m.continuationToken = msg.ContinuationToken
 		m.hasMore = msg.HasMore
 
-		if !msg.Append {
-			m.items = newItems
-			m.sortItems()
-		} else {
-			m.items = newItems
-		}
+		m.items = newItems
+		m.sortItems()
 
 		return m, nil
 
